@@ -14,11 +14,11 @@ if [[ "$(id -u)" != "0" ]]; then
     exit 1
 fi
 
-# 2. Check OS distribution (Ubuntu only)
+# 2. Check OS distribution (Ubuntu / Debian)
 if [ -f /etc/os-release ]; then
     . /etc/os-release
-    if [[ "${ID:-}" != "ubuntu" ]]; then
-        echo -e "${RED}错误: 本系统不是 Ubuntu！目前 AimiliVPN 仅支持 Ubuntu 系统。${PLAIN}"
+    if [[ "${ID:-}" != "ubuntu" ]] && [[ "${ID:-}" != "debian" ]]; then
+        echo -e "${RED}错误: 本系统不是 Ubuntu 或 Debian！目前 AimiliVPN 仅支持 Ubuntu/Debian 系统。${PLAIN}"
         exit 1
     fi
 else
@@ -31,9 +31,9 @@ echo -e "${BLUE}        欢迎使用 AimiliVPN 一键源码部署与管理脚本
 echo -e "${BLUE}==========================================================${PLAIN}"
 
 # 3. Configure GitHub Repository URL
-# Default to the official repository (baoweise-bot/aimili-vpngate)
-DEFAULT_USER="baoweise-bot"
-DEFAULT_REPO="aimili-vpngate"
+# Default to the official repository (baipiaoking88/vpngate-proxy)
+DEFAULT_USER="baipiaoking88"
+DEFAULT_REPO="vpngate-proxy"
 
 # Allow custom repository override via command line arguments
 GITHUB_USER="${1:-${DEFAULT_USER}}"

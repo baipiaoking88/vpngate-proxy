@@ -2197,33 +2197,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </header>
 <main>
-  <section class="ad-section">
-    <div class="ad-card">
-      <div class="ad-title">
-        <span class="ad-badge">推荐</span> <strong>购买高性价比 VPS 搭建节点或用作客户端</strong>
-      </div>
-      <div class="ad-links">
-        <div class="ad-item">
-          <span class="ad-tag tag-normal">普通用户推荐</span>
-          <span class="ad-desc">RackNerd - 超低折扣价格，日常使用实惠方便，海外多机房可选，推荐普通家庭或低频用户。</span>
-          <a href="https://my.racknerd.com/aff.php?aff=18708" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-        <div class="ad-item">
-          <span class="ad-tag tag-opt">网络优化推荐</span>
-          <span class="ad-desc">VMiss - 专线优化网络 (CN2 GIA/9929/CMIN2 等顶级线路)，低延迟不丢包，推荐高网络要求用户。</span>
-          <a href="https://app.vmiss.com/aff.php?aff=4619" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-        <div class="ad-item">
-          <span class="ad-tag tag-premium">高端企业推荐</span>
-          <span class="ad-desc">BandwagonHost (搬瓦工) - 直连三网顶级专线，经典高带宽 CN2 GIA 线路，超凡稳定速度。</span>
-          <a href="https://bandwagonhost.com/aff.php?aff=81790" target="_blank" class="ad-btn">点击进入官网</a>
-        </div>
-      </div>
-      <div class="ad-footer">
-        官方技术支持及优质资源交流论坛：<a href="https://339936.xyz" target="_blank" class="forum-link">339936.xyz</a>
-      </div>
-    </div>
-  </section>
+
 
   <!-- 当前连接活动节点卡片 -->
   <section class="active-node-section" id="active_node_card" style="margin-bottom: 24px;">
