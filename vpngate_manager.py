@@ -62,6 +62,77 @@ active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
 is_connecting = True
 last_active_ping_time = 0.0
+
+_ca_bundle_lock = threading.Lock()
+_ca_bundle_cached: str | None = None
+
+def _der_to_pem(der_data: bytes) -> str | None:
+    """Convert DER-encoded X.509 certificate to PEM string."""
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+        from cryptography import x509
+        cert = x509.load_der_x509_certificate(der_data, default_backend())
+        return cert.public_bytes(encoding=serialization.Encoding.PEM).decode("utf-8").strip()
+    except Exception:
+        import subprocess
+        try:
+            res = subprocess.run(
+                ["openssl", "x509", "-inform", "DER", "-outform", "PEM"],
+                input=der_data, capture_output=True, timeout=5,
+            )
+            if res.returncode == 0:
+                return res.stdout.decode("utf-8").strip()
+        except Exception:
+            pass
+    return None
+
+def _get_ca_bundle() -> str:
+    """Return a CA bundle with the YR1 intermediate + ISRG Root YR certs.
+    Downloads fresh from Let's Encrypt on first call; caches in memory."""
+    global _ca_bundle_cached
+    with _ca_bundle_lock:
+        if _ca_bundle_cached is not None:
+            return _ca_bundle_cached
+        parts: list[str] = []
+        for url in ("http://yr1.i.lencr.org/", "http://yr.i.lencr.org/"):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    data = resp.read()
+                    if b"BEGIN CERTIFICATE" in data:
+                        parts.append(data.decode("utf-8", errors="replace").strip())
+                    elif data and data[0] == 0x30:
+                        pem = _der_to_pem(data)
+                        if pem:
+                            parts.append(pem)
+            except Exception:
+                pass
+        if not parts:
+            parts = []
+        _ca_bundle_cached = "\n".join(parts)
+        return _ca_bundle_cached
+
+def _patch_config_ca(config_text: str) -> str:
+    """Append the newer ISRG Root YR + YR1 root certs *inside* the existing
+    <ca> block so that OpenVPN can verify both old and new Let's Encrypt chains.
+
+    SoftEther public VPN servers switched from ISRG Root X1 → ... to
+    ISRG Root YR → YR1 → leaf in mid-2025 but the embedded config from the
+    VPNGate API still carries only the old ISRG Root X1.
+    """
+    extra = _get_ca_bundle()
+    if not extra:
+        return config_text
+    # Insert the downloaded certs right before </ca>
+    patched, count = re.subn(
+        r'(</ca>)',
+        extra + '\n\\1',
+        config_text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    return patched
 last_active_latency = 0
 
 def ensure_dirs() -> None:
@@ -258,6 +329,7 @@ def mark_blacklisted(node: dict[str, Any], message: str) -> None:
     pass
 
 def row_to_node(row: dict[str, str], config_text: str) -> dict[str, Any]:
+    config_text = _patch_config_ca(config_text)
     ip = row.get("IP", "")
     country_short = row.get("CountryShort", "")
     remote_host, remote_port, proto = vpn_utils.parse_remote(config_text, ip)
