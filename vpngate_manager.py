@@ -57,11 +57,19 @@ STATE_FILE = DATA_DIR / "state.json"
 AUTH_FILE = DATA_DIR / "vpngate_auth.txt"
 
 lock = threading.RLock()
+sessions_lock = threading.Lock()
 active_sessions: dict[str, float] = {}
 active_openvpn_process: subprocess.Popen[str] | None = None
 active_openvpn_node_id = ""
 is_connecting = True
 last_active_ping_time = 0.0
+
+def prune_expired_sessions() -> None:
+    now = time.time()
+    with sessions_lock:
+        expired = [s for s, exp in list(active_sessions.items()) if exp <= now]
+        for s in expired:
+            del active_sessions[s]
 
 _ca_bundle_lock = threading.Lock()
 _ca_bundle_cached: str | None = None
@@ -186,8 +194,16 @@ def generate_random_username() -> str:
             if has_lower and has_upper and has_digit:
                 return uname
 
+_ui_config_cache: dict[str, Any] | None = None
+_ui_config_cache_time: float = 0
+
 def load_ui_config() -> dict[str, Any]:
+    global _ui_config_cache, _ui_config_cache_time
     with lock:
+        now = time.time()
+        if _ui_config_cache is not None and now - _ui_config_cache_time < 2.0:
+            return _ui_config_cache
+        
         auth_file = DATA_DIR / "ui_auth.json"
         config = {
             "username": "",
@@ -219,7 +235,9 @@ def load_ui_config() -> dict[str, Any]:
                 auth_file.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
-                
+        
+        _ui_config_cache = config
+        _ui_config_cache_time = now
         return config
 
 def get_session_token(password: str, username: str = "admin") -> str:
@@ -3173,6 +3191,7 @@ def background_proxy_checker() -> None:
     time.sleep(2)
     while True:
         try:
+            prune_expired_sessions()
             if is_connecting:
                 time.sleep(5)
                 continue
@@ -3215,7 +3234,7 @@ def background_proxy_checker() -> None:
         time.sleep(30)
 
 def active_node_pinger() -> None:
-    global active_openvpn_node_id, is_connecting
+    global active_openvpn_node_id, is_connecting, last_active_latency
     while True:
         try:
             if active_openvpn_running() and active_openvpn_node_id:
@@ -3228,6 +3247,7 @@ def active_node_pinger() -> None:
                     if ip:
                         latency = vpn_utils.ping_latency_ms(ip, port, fallback)
                         if latency > 0:
+                            last_active_latency = latency
                             set_state(active_node_latency=f"{latency} ms")
                         else:
                             set_state(active_node_latency="检测超时")
@@ -3288,7 +3308,8 @@ class Handler(BaseHTTPRequestHandler):
         if not session_token:
             return False
             
-        with lock:
+        prune_expired_sessions()
+        with sessions_lock:
             exp_time = active_sessions.get(session_token)
             if exp_time is not None and exp_time > time.time():
                 return True
@@ -3339,32 +3360,13 @@ class Handler(BaseHTTPRequestHandler):
         if effective_path in ("/", "/index.html"):
             self.send_bytes(INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
         elif effective_path == "/api/nodes":
-            global last_active_ping_time, last_active_latency, active_openvpn_node_id
+            global last_active_latency, active_openvpn_node_id
             nodes = read_json(NODES_FILE, [])
             active_node = next((n for n in nodes if active_openvpn_node_id and n.get("id") == active_openvpn_node_id), None)
             for n in nodes:
                 n["active"] = (active_openvpn_node_id and n.get("id") == active_openvpn_node_id)
-            if active_node:
-                ip = active_node.get("ip") or active_node.get("remote_host")
-                if ip:
-                    now = time.time()
-                    if now - last_active_ping_time > 15.0:
-                        last_active_ping_time = now
-                        def bg_ping(ip_addr: str, port: int, fallback: int) -> None:
-                            global last_active_latency
-                            try:
-                                latency = vpn_utils.ping_latency_ms(ip_addr, port, fallback)
-                                if latency > 0:
-                                    last_active_latency = latency
-                            except Exception:
-                                pass
-                        threading.Thread(
-                            target=bg_ping, 
-                            args=(ip, parse_int(active_node.get("remote_port")), parse_int(active_node.get("ping"))),
-                            daemon=True
-                        ).start()
-                    if last_active_latency > 0:
-                        active_node["latency_ms"] = last_active_latency
+            if active_node and last_active_latency > 0:
+                active_node["latency_ms"] = last_active_latency
             stripped_nodes = []
             for n in nodes:
                 stripped = n.copy()
@@ -3401,7 +3403,7 @@ class Handler(BaseHTTPRequestHandler):
                 
                 if expected_pwd and input_pwd == expected_pwd and input_uname == expected_uname:
                     token = uuid.uuid4().hex
-                    with lock:
+                    with sessions_lock:
                         active_sessions[token] = time.time() + 30 * 24 * 3600
                     self.send_response(HTTPStatus.OK)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -3428,7 +3430,7 @@ class Handler(BaseHTTPRequestHandler):
                             cookies[k.strip()] = v.strip()
                 session_token = cookies.get("session")
                 if session_token:
-                    with lock:
+                    with sessions_lock:
                         active_sessions.pop(session_token, None)
                 secret_path = self.get_secret_path()
                 cookie_path = f"/{secret_path}/" if secret_path else "/"
