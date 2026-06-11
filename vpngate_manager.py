@@ -3623,16 +3623,34 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+_MAX_LOG_SIZE = 5 * 1024 * 1024
+
 class Tee:
     def __init__(self, file_path: str):
         Path(file_path).parent.mkdir(exist_ok=True, parents=True)
+        self.file_path = file_path
         self.file = open(file_path, "a", encoding="utf-8")
         self.stdout = sys.stdout
+        self._write_count = 0
 
     def write(self, data: str) -> None:
         self.stdout.write(data)
         self.file.write(data)
-        self.file.flush()
+        self._write_count += 1
+        if self._write_count % 200 == 0:
+            self.file.flush()
+            try:
+                if Path(self.file_path).stat().st_size > _MAX_LOG_SIZE:
+                    self.file.close()
+                    backup = self.file_path + ".1"
+                    try:
+                        Path(backup).unlink()
+                    except Exception:
+                        pass
+                    Path(self.file_path).rename(backup)
+                    self.file = open(self.file_path, "a", encoding="utf-8")
+            except Exception:
+                pass
 
     def flush(self) -> None:
         self.stdout.flush()
