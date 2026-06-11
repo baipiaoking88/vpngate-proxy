@@ -696,25 +696,18 @@ def cleanup_policy_routing() -> None:
 def stop_active_openvpn() -> None:
     global active_openvpn_process, active_openvpn_node_id
     cleanup_policy_routing()
-    config_to_delete = None
     if active_openvpn_node_id:
-        nodes = read_json(NODES_FILE, [])
-        node = next((item for item in nodes if item.get("id") == active_openvpn_node_id), None)
-        if node:
-            config_to_delete = node.get("config_file")
+        with lock:
+            nodes = read_json(NODES_FILE, [])
+            for item in nodes:
+                if item.get("id") == active_openvpn_node_id:
+                    item["active"] = False
+                    break
             
     stop_process(active_openvpn_process)
     active_openvpn_process = None
     active_openvpn_node_id = ""
     kill_existing_openvpn_processes()
-    
-    if config_to_delete:
-        try:
-            path = Path(config_to_delete)
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
 
 def active_openvpn_running() -> bool:
     return active_openvpn_process is not None and active_openvpn_process.poll() is None
@@ -776,12 +769,6 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=f"tun{idx}")
     finally:
         release_test_index(idx)
-    
-    try:
-        if temp_path.exists():
-            temp_path.unlink()
-    except Exception:
-        pass
 
     temp_node = {
         "id": node_id,
@@ -846,12 +833,6 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         dev_name = f"tun{idx + 1}"
         ok, message, _ = run_openvpn_until_ready(config_file, keep_alive=False, route_nopull=True, timeout=12, dev=dev_name)
         
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except Exception:
-            pass
-            
         temp_node = {
             "id": node_id,
             "latency_ms": latency,
@@ -986,11 +967,6 @@ def connect_node(node_id: str) -> str:
         set_state(active_node_latency="启动核心", last_check_message="正在启动 OpenVPN Core 核心服务并建立连接...")
         ok, message, process = run_openvpn_until_ready(str(node["config_file"]), keep_alive=True, route_nopull=True)
         if not ok or process is None:
-            try:
-                if config_path.exists():
-                    config_path.unlink()
-            except Exception:
-                pass
             node["probe_status"] = "unavailable"
             node["probe_message"] = message
             for item in nodes:
