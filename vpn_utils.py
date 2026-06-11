@@ -316,6 +316,8 @@ def load_ip_cache() -> dict[str, dict[str, Any]]:
 def save_ip_cache(cache: dict[str, dict[str, Any]]) -> None:
     with ip_cache_lock:
         try:
+            now = time.time()
+            cache = {k: v for k, v in cache.items() if now - v.get("cached_at", 0) < 14 * 24 * 3600}
             DATA_DIR.mkdir(exist_ok=True)
             IP_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:

@@ -153,6 +153,35 @@ def ensure_dirs() -> None:
         except OSError:
             pass
 
+def _get_node_config_text(node: dict[str, Any]) -> str:
+    config_text = node.get("config_text")
+    if config_text:
+        return config_text
+    config_file = node.get("config_file")
+    if config_file:
+        try:
+            return Path(config_file).read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return ""
+
+def _save_nodes(nodes: list[dict[str, Any]]) -> None:
+    CONFIG_DIR.mkdir(exist_ok=True, parents=True)
+    for n in nodes:
+        ct = n.get("config_text")
+        if ct:
+            config_path = Path(n.get("config_file", ""))
+            if config_path.name:
+                try:
+                    config_path.write_text(ct, encoding="utf-8")
+                except Exception:
+                    pass
+    stripped = []
+    for n in nodes:
+        s = {k: v for k, v in n.items() if k != "config_text"}
+        stripped.append(s)
+    write_json(NODES_FILE, stripped)
+
 def write_json(path: Path, data: Any) -> None:
     with lock:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -265,7 +294,10 @@ def cleanup_old_logs(logs_dir: Path) -> None:
     except Exception as e:
         print(f"[清理错误] 清理旧日志失败: {e}", flush=True)
 
+_last_log_cleanup: float = 0
+
 def log_to_json(level: str, module: str, message: str) -> None:
+    global _last_log_cleanup
     try:
         logs_dir = DATA_DIR / "logs"
         logs_dir.mkdir(exist_ok=True, parents=True)
@@ -279,7 +311,10 @@ def log_to_json(level: str, module: str, message: str) -> None:
         }
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        cleanup_old_logs(logs_dir)
+        now = time.time()
+        if now - _last_log_cleanup > 3600:
+            _last_log_cleanup = now
+            cleanup_old_logs(logs_dir)
     except Exception as e:
         print(f"[Log Error] Failed to write JSON log: {e}", flush=True)
 
@@ -501,12 +536,23 @@ def openvpn_command(config_file: str, route_nopull: bool, dev: str = "tun0") -> 
 
 def stop_process(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
+        if process is not None and process.stdout:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
         return
     process.terminate()
     try:
         process.wait(timeout=8)
     except subprocess.TimeoutExpired:
         process.kill()
+        process.wait(timeout=5)
+    if process.stdout:
+        try:
+            process.stdout.close()
+        except Exception:
+            pass
 
 def kill_existing_openvpn_processes() -> None:
     if not sys.platform.startswith("linux"):
@@ -606,6 +652,8 @@ def run_openvpn_until_ready(config_file: str, keep_alive: bool, route_nopull: bo
     if not ok and tail:
         message = tail[-1][-220:]
     startup_done[0] = True
+    with lines.mutex:
+        lines.queue.clear()
     if not keep_alive or not ok:
         stop_process(process)
         process = None
@@ -688,6 +736,7 @@ def sort_all_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 active_test_indexes = set()
 test_indexes_lock = threading.Lock()
+_refreshing = threading.Event()
 
 def get_free_test_index() -> int:
     with test_indexes_lock:
@@ -708,7 +757,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
         if not node:
             raise ValueError(f"Node not found: {node_id}")
         config_file = str(node["config_file"])
-        config_text = node.get("config_text") or ""
+        config_text = _get_node_config_text(node)
         h = str(node.get("remote_host") or node.get("ip"))
         p = parse_int(node.get("remote_port"))
         fallback_ping = parse_int(node.get("ping"))
@@ -766,7 +815,7 @@ def test_node_by_id(node_id: str) -> dict[str, Any]:
                 node["quality"] = temp_node["quality"]
             
             sorted_nodes = sort_all_nodes(nodes)
-            write_json(NODES_FILE, sorted_nodes)
+            _save_nodes(sorted_nodes)
             res = next((item for item in sorted_nodes if item.get("id") == node_id), node)
             return res
         else:
@@ -781,7 +830,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
         idx, n_info = args
         node_id = n_info["id"]
         config_file = n_info["config_file"]
-        config_text = n_info.get("config_text") or ""
+        config_text = _get_node_config_text(n_info)
         h = str(n_info.get("remote_host") or n_info.get("ip"))
         p = parse_int(n_info.get("remote_port"))
         fallback_ping = parse_int(n_info.get("ping"))
@@ -854,7 +903,7 @@ def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
             if nid in updated_nodes_map:
                 n.update(updated_nodes_map[nid])
         sorted_nodes = sort_all_nodes(current_nodes)
-        write_json(NODES_FILE, sorted_nodes)
+        _save_nodes(sorted_nodes)
         
     return list(updated_nodes_map.values())
 
@@ -894,7 +943,7 @@ def auto_switch_node(attempt: int = 0) -> None:
             nodes = read_json(NODES_FILE, [])
             for item in nodes:
                 item["active"] = False
-            write_json(NODES_FILE, nodes)
+            _save_nodes(nodes)
         set_state(active_openvpn_node_id="", last_check_message="没有可用的备选节点，已断开")
         
         def bg_fetch_and_switch():
@@ -930,7 +979,7 @@ def connect_node(node_id: str) -> str:
         config_path = Path(node["config_file"])
         try:
             CONFIG_DIR.mkdir(exist_ok=True, parents=True)
-            config_path.write_text(node.get("config_text") or "", encoding="utf-8")
+            config_path.write_text(_get_node_config_text(node), encoding="utf-8")
         except Exception as e:
             raise RuntimeError(f"Failed to write configuration: {e}")
 
@@ -946,7 +995,7 @@ def connect_node(node_id: str) -> str:
             node["probe_message"] = message
             for item in nodes:
                 item["active"] = False
-            write_json(NODES_FILE, nodes)
+            _save_nodes(nodes)
             log_to_json("ERROR", "VPN", f"连接节点 {node_id} 失败: {message}")
             set_state(active_openvpn_node_id="", is_connecting=False, active_node_latency="无活动连接", last_check_message=f"连接失败: {message}")
             with lock:
@@ -978,7 +1027,7 @@ def connect_node(node_id: str) -> str:
             item["active"] = item.get("id") == node_id
             if item["active"]:
                 item["probe_message"] = f"Active node. HTTP proxy: http://{LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}"
-        write_json(NODES_FILE, nodes)
+        _save_nodes(nodes)
         
         set_state(last_check_message="正在测试本地代理出站联通性与出口 IP...")
         res = check_proxy_health()
@@ -1058,15 +1107,7 @@ def maintain_valid_nodes(force: bool = False) -> str:
             if len(merged) > 1000:
                 merged = merged[:1000]
                 
-            for n in merged:
-                config_path = Path(n["config_file"])
-                if not config_path.exists():
-                    try:
-                        config_path.write_text(n["config_text"], encoding="utf-8")
-                    except Exception:
-                        pass
-                        
-            write_json(NODES_FILE, merged)
+            _save_nodes(merged)
 
         # Test the first 10 non-active nodes from the new list
         with lock:
@@ -3225,7 +3266,7 @@ def background_proxy_checker() -> None:
                         if active_node:
                             mark_blacklisted(active_node, f"代理连通性检测失败: {error_msg}")
                             active_node["probe_status"] = "unavailable"
-                            write_json(NODES_FILE, nodes)
+                            _save_nodes(nodes)
                     
                     auto_switch_node()
         except Exception as e:
@@ -3367,22 +3408,18 @@ class Handler(BaseHTTPRequestHandler):
                 n["active"] = (active_openvpn_node_id and n.get("id") == active_openvpn_node_id)
             if active_node and last_active_latency > 0:
                 active_node["latency_ms"] = last_active_latency
-            stripped_nodes = []
-            for n in nodes:
-                stripped = n.copy()
-                if "config_text" in stripped:
-                    del stripped["config_text"]
-                stripped_nodes.append(stripped)
-            self.send_json({"nodes": stripped_nodes, "state": get_state()})
+            self.send_json({"nodes": nodes, "state": get_state()})
         elif effective_path.startswith("/configs/"):
             filename = urllib.parse.unquote(effective_path.removeprefix("/configs/"))
             with lock:
                 nodes = read_json(NODES_FILE, [])
                 node = next((n for n in nodes if Path(n.get("config_file", "")).name == filename), None)
-            if node and node.get("config_text"):
-                self.send_bytes(node["config_text"].encode("utf-8"), "application/x-openvpn-profile")
-            else:
-                self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            if node:
+                config_text = _get_node_config_text(node)
+                if config_text:
+                    self.send_bytes(config_text.encode("utf-8"), "application/x-openvpn-profile")
+                    return
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         else:
             self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -3515,8 +3552,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/refresh_nodes":
             try:
-                threading.Thread(target=maintain_valid_nodes, args=(False,), daemon=True).start()
-                self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
+                if _refreshing.is_set():
+                    self.send_json({"ok": True, "message": "节点更新已在进行中，请稍候"})
+                else:
+                    def _bg_refresh():
+                        if _refreshing.is_set():
+                            return
+                        _refreshing.set()
+                        try:
+                            maintain_valid_nodes(False)
+                        finally:
+                            _refreshing.clear()
+                    threading.Thread(target=_bg_refresh, daemon=True).start()
+                    self.send_json({"ok": True, "message": "已在后台启动节点更新流程"})
             except Exception as exc:
                 self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
         elif effective_path == "/api/test_nodes":
@@ -3535,7 +3583,7 @@ class Handler(BaseHTTPRequestHandler):
                     nodes = read_json(NODES_FILE, [])
                     for item in nodes:
                         item["active"] = False
-                    write_json(NODES_FILE, nodes)
+                    _save_nodes(nodes)
                 global last_active_ping_time, last_active_latency
                 last_active_ping_time = 0.0
                 last_active_latency = 0
