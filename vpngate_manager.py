@@ -165,6 +165,19 @@ def _get_node_config_text(node: dict[str, Any]) -> str:
             pass
     return ""
 
+def _cleanup_stale_configs(nodes: list[dict[str, Any]]) -> None:
+    keep_ids = {n.get("id") for n in nodes if n.get("id")}
+    try:
+        for f in CONFIG_DIR.glob("*.ovpn"):
+            stem = f.stem
+            if stem not in keep_ids:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def _save_nodes(nodes: list[dict[str, Any]]) -> None:
     CONFIG_DIR.mkdir(exist_ok=True, parents=True)
     for n in nodes:
@@ -176,6 +189,7 @@ def _save_nodes(nodes: list[dict[str, Any]]) -> None:
                     config_path.write_text(ct, encoding="utf-8")
                 except Exception:
                     pass
+    _cleanup_stale_configs(nodes)
     stripped = []
     for n in nodes:
         s = {k: v for k, v in n.items() if k != "config_text"}
